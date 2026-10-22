@@ -1,2 +1,2 @@
 # Some-Scripts
-As the repository name.
+存放一些零散的、不成体系的脚本（或其他小东西）。
