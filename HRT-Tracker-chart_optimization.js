@@ -1,8 +1,7 @@
-HRT Tracker 曲线显示开关
 // ==UserScript==
 // @name         HRT Tracker · 曲线显示开关
 // @namespace    whatasiger.hrt.curves
-// @version      1.0.1
+// @version      1.1.0
 // @description  添加 CPA 曲线开关和只显示个体化模型开关，支持移动端。
 // @match        https://hrt.transmtf.com/*
 // @run-at       document-idle
@@ -15,178 +14,83 @@ HRT Tracker 曲线显示开关
 
   const ID = 'hrt-curve-switches-v1';
   const STORAGE = 'whatasiger.hrt.curve-visibility.v1';
-
   if (document.getElementById(ID + '-style')) return;
 
-  let prefs = {
-    hideCPA: false,
-    personalOnly: false
+  // 只认 true，其余一律按默认值处理
+  const parse = raw => {
+    try {
+      const s = JSON.parse(raw || '{}');
+      return { hideCPA: s.hideCPA === true, personalOnly: s.personalOnly === true };
+    } catch {
+      return { hideCPA: false, personalOnly: false };
+    }
   };
 
-  try {
-    const saved = JSON.parse(
-      localStorage.getItem(STORAGE) || '{}'
-    );
-    prefs.hideCPA = saved.hideCPA === true;
-    prefs.personalOnly = saved.personalOnly === true;
-  } catch (_) {}
+  let prefs;
+  try { prefs = parse(localStorage.getItem(STORAGE)); }
+  catch { prefs = parse(null); }
 
   const style = document.createElement('style');
   style.id = ID + '-style';
   style.textContent = `
-    [data-hrt-curve-hidden="1"] {
-      display: none !important;
-    }
-
+    [data-hrt-curve-hidden="1"] { display: none !important; }
     .hrt-curve-controls {
-      display: inline-flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-left: auto;
-      max-width: 100%;
-      box-sizing: border-box;
+      display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px;
+      margin-left: auto; max-width: 100%; box-sizing: border-box;
     }
-
     .hrt-curve-controls button {
-      appearance: none;
-      -webkit-appearance: none;
-      cursor: pointer;
-      touch-action: manipulation;
-      font: inherit;
-      font-size: 12px;
-      line-height: 1.4;
-      font-weight: 600;
-      padding: 7px 10px;
-      border-radius: 9px;
+      appearance: none; -webkit-appearance: none; cursor: pointer; touch-action: manipulation;
+      font: inherit; font-size: 12px; line-height: 1.4; font-weight: 600;
+      padding: 7px 10px; border-radius: 9px; box-sizing: border-box; white-space: nowrap;
       border: 1px solid var(--border-primary, #ddd);
-      color: var(--text-secondary, #555);
-      background: var(--bg-card, #fff);
-      white-space: nowrap;
-      box-sizing: border-box;
+      color: var(--text-secondary, #555); background: var(--bg-card, #fff);
     }
-
     .hrt-curve-controls button[aria-pressed="true"] {
-      color: #e11d48;
-      background: var(--bg-secondary, #fff1f2);
-      border-color: #fb7185;
+      color: #e11d48; background: var(--bg-secondary, #fff1f2); border-color: #fb7185;
     }
-
-    .hrt-curve-controls button:focus-visible {
-      outline: 2px solid #f43f5e;
-      outline-offset: 2px;
-    }
-
-    .hrt-curve-controls button:disabled {
-      opacity: .5;
-      cursor: not-allowed;
-    }
-
-    .hrt-curve-note {
-      flex-basis: 100%;
-      font-size: 11px;
-      line-height: 1.5;
-      color: var(--text-tertiary, #888);
-    }
-
-    .hrt-curve-note[hidden] {
-      display: none !important;
-    }
-
+    .hrt-curve-controls button:focus-visible { outline: 2px solid #f43f5e; outline-offset: 2px; }
+    .hrt-curve-controls button:disabled { opacity: .5; cursor: not-allowed; }
+    .hrt-curve-note { flex-basis: 100%; font-size: 11px; line-height: 1.5; color: var(--text-tertiary, #888); }
+    .hrt-curve-note[hidden] { display: none !important; }
     @media (max-width: 640px), (pointer: coarse) {
-      .hrt-curve-controls {
-        order: 3;
-        flex-basis: 100%;
-        width: 100%;
-        margin-left: 0;
-      }
-
-      .hrt-curve-controls button {
-        min-height: 44px;
-        padding: 10px 12px;
-        font-size: 13px;
-      }
+      .hrt-curve-controls { order: 3; flex-basis: 100%; width: 100%; margin-left: 0; }
+      .hrt-curve-controls button { min-height: 44px; padding: 10px 12px; font-size: 13px; }
     }
   `;
   (document.head || document.documentElement).appendChild(style);
 
-  const cpaKeys = new Set([
-    'concCPA',
-    'concPersonalCPA',
-    'cpaCi95Low',
-    'cpaCi95Band'
-  ]);
+  // CPA 开关要隐藏的系列；「只显示个体化」要隐藏的群体模型系列
+  const CPA = new Set(['concCPA', 'concPersonalCPA', 'cpaCi95Low', 'cpaCi95Band']);
+  const PRIOR = new Set(['concE2', 'concCPA', 'cpaCi95Low', 'cpaCi95Band']);
+  // 识别用的全集：包含不隐藏的 CI 系列，避免沿 fiber 上溯时误认到别的组件
+  const ALL = new Set([...CPA, ...PRIOR, 'concPersonal', 'ci95Low', 'ci95Band', 'ci68Low', 'ci68Band']);
 
-  const priorKeys = new Set([
-    'concE2',
-    'concCPA',
-    'cpaCi95Low',
-    'cpaCi95Band'
-  ]);
-
-  const seriesKeys = new Set([
-    ...cpaKeys,
-    ...priorKeys,
-    'concPersonal',
-    'concPersonalCPA',
-    'ci95Low',
-    'ci95Band',
-    'ci68Low',
-    'ci68Band'
-  ]);
-
-  // 从 Recharts 对应组件的只读 props 中识别系列。
-  // 不修改用药记录、校准参数或网站的计算结果。
-  function seriesKey(element) {
-    const own = Object.keys(element).find(
-      key => key.startsWith('__reactFiber$')
-    );
-
-    let fiber = own ? element[own] : null;
-
-    for (
-      let depth = 0;
-      fiber && depth < 18;
-      depth++, fiber = fiber.return
-    ) {
-      const props = fiber.memoizedProps;
-
-      if (props && seriesKeys.has(props.dataKey)) {
-        return props.dataKey;
-      }
+  // 从 Recharts 组件的只读 props 识别系列，不改动网站数据
+  function seriesKey(el) {
+    const prop = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+    for (let f = prop && el[prop], i = 0; f && i < 18; f = f.return, i++) {
+      const key = f.memoizedProps?.dataKey;
+      if (ALL.has(key)) return key;
     }
-
     return null;
   }
 
-  function setHidden(element, hidden) {
-    if (hidden) {
-      if (element.getAttribute('data-hrt-curve-hidden') !== '1') {
-        element.setAttribute('data-hrt-curve-hidden', '1');
-      }
-    } else if (element.hasAttribute('data-hrt-curve-hidden')) {
-      element.removeAttribute('data-hrt-curve-hidden');
+  // 值相同则不写，避免触发 MutationObserver 循环；value 为 null 表示移除
+  function attr(el, name, value) {
+    if (value == null) {
+      if (el.hasAttribute(name)) el.removeAttribute(name);
+    } else if (el.getAttribute(name) !== value) {
+      el.setAttribute(name, value);
     }
   }
 
-  function setText(element, value) {
-    if (element.textContent !== value) {
-      element.textContent = value;
-    }
+  function text(el, value) {
+    if (el.textContent !== value) el.textContent = value;
   }
 
-  function setPressed(element, value) {
-    const next = String(value);
-    if (element.getAttribute('aria-pressed') !== next) {
-      element.setAttribute('aria-pressed', next);
-    }
-  }
-
-  function persist() {
-    try {
-      localStorage.setItem(STORAGE, JSON.stringify(prefs));
-    } catch (_) {}
-
+  function toggle(name) {
+    prefs[name] = !prefs[name];
+    try { localStorage.setItem(STORAGE, JSON.stringify(prefs)); } catch {}
     refresh();
   }
 
@@ -194,185 +98,101 @@ HRT Tracker 曲线显示开关
 
   function controlsFor(card) {
     const cached = toolbars.get(card);
-
-    if (cached && cached.root.isConnected) {
-      return cached;
-    }
+    if (cached?.root.isConnected) return cached;
 
     const heading = card.querySelector('h2');
-    const header = heading?.parentElement;
-
-    if (!header) return null;
+    if (!heading?.parentElement) return null;
 
     const root = document.createElement('div');
     root.className = 'hrt-curve-controls';
     root.setAttribute('role', 'group');
     root.setAttribute('aria-label', '曲线显示控制');
 
-    const cpa = document.createElement('button');
-    cpa.type = 'button';
-    cpa.addEventListener('click', () => {
-      prefs.hideCPA = !prefs.hideCPA;
-      persist();
-    });
+    const button = (label, pref) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.addEventListener('click', () => toggle(pref));
+      return b;
+    };
 
-    const personal = document.createElement('button');
-    personal.type = 'button';
-    personal.textContent = '只显示个体化模型';
-    personal.addEventListener('click', () => {
-      prefs.personalOnly = !prefs.personalOnly;
-      persist();
-    });
-
+    const cpa = button('', 'hideCPA');
+    const personal = button('只显示个体化模型', 'personalOnly');
     const note = document.createElement('span');
     note.className = 'hrt-curve-note';
     note.setAttribute('role', 'status');
 
     root.append(cpa, personal, note);
-
-    // 桌面端位于原有工具图标旁，移动端自动换行。
-    header.insertBefore(root, heading.nextSibling);
+    heading.after(root); // 桌面端位于工具图标旁，移动端自动换行
 
     const controls = { root, cpa, personal, note };
     toolbars.set(card, controls);
-
     return controls;
   }
 
   function refresh() {
-    // 只操作主图，排除缩略图与分享导出图。
-    const gradients = document.querySelectorAll(
-      'linearGradient[id="colorConc"]'
-    );
-
-    for (const gradient of gradients) {
+    // colorConc 渐变只存在于主图，借此排除缩略图与分享导出图
+    for (const gradient of document.querySelectorAll('linearGradient[id="colorConc"]')) {
       const chart = gradient.closest('.recharts-wrapper');
       const card = chart?.closest('.glass-card');
+      const c = card && controlsFor(card);
+      if (!c) continue;
 
-      if (!chart || !card) continue;
+      const groups = [...chart.querySelectorAll('.recharts-area, .recharts-line, .recharts-scatter')]
+        .map(el => [el, seriesKey(el)]);
+      const keys = new Set(groups.map(([, k]) => k));
+      const identified = keys.has('concE2');
+      const hasPersonal = keys.has('concPersonal');
 
-      const controls = controlsFor(card);
-      if (!controls) continue;
-
-      const groups = [
-        ...chart.querySelectorAll(
-          '.recharts-area, .recharts-line, .recharts-scatter'
-        )
-      ].map(element => ({
-        element,
-        key: seriesKey(element)
-      }));
-
-      const identified = groups.some(
-        group => group.key === 'concE2'
-      );
-
-      const hasPersonal = groups.some(
-        group => group.key === 'concPersonal'
-      );
-
-      const axes = [
-        ...chart.querySelectorAll('.recharts-yAxis')
-      ];
-
-      const rightAxis = axes.find(
-        axis => /CPA\s*\(/i.test(axis.textContent || '')
-      );
-
-      // 网站也用 concCPA 存放 BICA，按坐标轴区分。
+      // 网站也用 concCPA 存放 BICA，按右侧坐标轴标题区分
+      const axes = chart.querySelectorAll('.recharts-yAxis');
+      const rightAxis = [...axes].find(a => /CPA\s*\(/i.test(a.textContent || ''));
       const hasCPA = Boolean(rightAxis);
+      const hideCPA = prefs.hideCPA && hasCPA;
       const only = prefs.personalOnly && hasPersonal && identified;
 
-      controls.cpa.disabled = !identified || !hasCPA;
-      controls.personal.disabled = !identified || !hasPersonal;
-
-      setText(
-        controls.cpa,
-        prefs.hideCPA ? '显示 CPA 曲线' : '隐藏 CPA 曲线'
-      );
-
-      setPressed(controls.cpa, prefs.hideCPA);
-      setPressed(controls.personal, only);
-
-      controls.cpa.title = hasCPA
+      c.cpa.disabled = !identified || !hasCPA;
+      c.personal.disabled = !identified || !hasPersonal;
+      text(c.cpa, prefs.hideCPA ? '显示 CPA 曲线' : '隐藏 CPA 曲线');
+      attr(c.cpa, 'aria-pressed', String(prefs.hideCPA));
+      attr(c.personal, 'aria-pressed', String(only));
+      c.cpa.title = hasCPA
         ? '切换 CPA 曲线、区间及右侧坐标轴的显示'
         : '当前图表没有 CPA 系列';
-
-      controls.personal.title = hasPersonal
+      c.personal.title = hasPersonal
         ? '隐藏群体模型，保留个体化曲线及 E2 置信区间；再次点击恢复'
         : '当前尚无个体化模型，请先启用校准并录入检测结果';
+      text(c.note, !identified ? '未能识别曲线，可能需要更新脚本。'
+        : !hasPersonal ? '当前尚无个体化曲线。' : '');
+      c.note.hidden = !c.note.textContent;
 
-      setText(
-        controls.note,
-        !identified
-          ? '未能识别曲线，可能需要更新脚本。'
-          : !hasPersonal
-            ? '当前尚无个体化曲线。'
-            : ''
-      );
-
-      controls.note.hidden = !controls.note.textContent;
-
-      for (const { element, key } of groups) {
-        const hidden = Boolean(key) && (
-          (
-            prefs.hideCPA &&
-            hasCPA &&
-            cpaKeys.has(key)
-          ) ||
-          (
-            only &&
-            priorKeys.has(key)
-          )
-        );
-
-        setHidden(element, hidden);
+      for (const [el, key] of groups) {
+        const hide = (hideCPA && CPA.has(key)) || (only && PRIOR.has(key));
+        attr(el, 'data-hrt-curve-hidden', hide ? '1' : null);
       }
-
       for (const axis of axes) {
-        setHidden(
-          axis,
-          prefs.hideCPA && axis === rightAxis
-        );
+        attr(axis, 'data-hrt-curve-hidden', hideCPA && axis === rightAxis ? '1' : null);
       }
     }
   }
 
   let scheduled = false;
-
   function schedule() {
     if (scheduled) return;
     scheduled = true;
-
-    requestAnimationFrame(() => {
-      scheduled = false;
-      refresh();
-    });
+    requestAnimationFrame(() => { scheduled = false; refresh(); });
   }
 
-  // SPA 页面切换、缩放和重新绘图后自动重新应用。
-  const observer = new MutationObserver(schedule);
-
-  observer.observe(document.documentElement, {
-    subtree: true,
-    childList: true,
-    attributes: true,
-    attributeFilter: ['class', 'd']
+  // SPA 切页、缩放、重绘后自动重新应用
+  new MutationObserver(schedule).observe(document.documentElement, {
+    subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'd']
   });
 
-  window.addEventListener('storage', event => {
-    if (event.key !== STORAGE) return;
-
-    try {
-      const saved = JSON.parse(event.newValue || '{}');
-
-      prefs = {
-        hideCPA: saved.hideCPA === true,
-        personalOnly: saved.personalOnly === true
-      };
-
-      schedule();
-    } catch (_) {}
+  // 多标签页同步开关状态（只开一个标签页的话可删）
+  addEventListener('storage', e => {
+    if (e.key !== STORAGE) return;
+    prefs = parse(e.newValue);
+    schedule();
   });
 
   refresh();
